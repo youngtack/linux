@@ -228,6 +228,28 @@ struct nvme_nvm_bb_tbl {
 	__u8	blk[0];
 };
 
+#ifdef CONFIG_NVM_FAKE
+#define FAKE_SSD	1
+
+#if (FAKE_SSD == 1)
+#define FAKE_VENDOR	0x144d	/* Samsung */
+#define FAKE_DEVICE	0xa802	/* 950 PRO */
+#define FAKE_CH		4
+#define FAKE_LUN	8
+#define FAKE_BLK	952
+#else
+#eror FAKE_SSD not defined
+#endif
+
+#define FAKE_PG		512
+#define FAKE_PLN	2
+#define FAKE_LBA	(((u64) FAKE_CH * FAKE_LUN * FAKE_BLK * FAKE_PG * \
+				FAKE_PLN) << 5)
+#define META_BUF_SZ	(((u64) FAKE_CH * FAKE_LUN * FAKE_BLK * FAKE_PG * \
+				FAKE_PLN) << 6)
+#define BB_BUF_SZ	((u64) FAKE_CH * FAKE_LUN * FAKE_BLK * FAKE_PLN)
+#endif
+
 /*
  * Check we didn't inadvertently grow the command struct
  */
@@ -312,12 +334,56 @@ static int nvme_nvm_identity(struct nvm_dev *nvmdev, struct nvm_id *nvm_id)
 	if (!nvme_nvm_id)
 		return -ENOMEM;
 
+#ifdef CONFIG_NVM_FAKE
+	nvme_nvm_id->ver_id = 1;
+	nvme_nvm_id->vmnt = 0;
+	nvme_nvm_id->cgrps = 1;
+	nvme_nvm_id->cap = 3;
+	nvme_nvm_id->dom = 0;
+
+	nvme_nvm_id->ppaf.sect_offset = 0;
+	nvme_nvm_id->ppaf.sect_len = 2;
+	nvme_nvm_id->ppaf.pln_offset = 2;
+	nvme_nvm_id->ppaf.pln_len = 1;
+	nvme_nvm_id->ppaf.ch_offset = 3;
+	nvme_nvm_id->ppaf.ch_len = 2;
+	nvme_nvm_id->ppaf.lun_offset = 5;
+	nvme_nvm_id->ppaf.lun_len = 3;
+	nvme_nvm_id->ppaf.pg_offset = 8;
+	nvme_nvm_id->ppaf.pg_len = 9;
+	nvme_nvm_id->ppaf.blk_offset = 17;
+	nvme_nvm_id->ppaf.blk_len = 16;
+
+	{
+		struct nvme_nvm_id_group *grp = nvme_nvm_id->groups;
+		grp->mtype = 0;
+		grp->fmtype = 0;
+		grp->num_ch = FAKE_CH;
+		grp->num_lun = FAKE_LUN;
+		grp->num_pln = FAKE_PLN;
+		grp->num_pg = FAKE_PG;
+		grp->num_blk = FAKE_BLK;
+		grp->fpg_sz = 16384;
+		grp->csecs = 4096;
+		grp->sos = 16;
+		grp->trdt = 70000;
+		grp->trdm = 100000;
+		grp->tprt = 1900000;
+		grp->tprm = 3500000;
+		grp->tbet = 3000000;
+		grp->tbem = 3000000;
+		grp->mpos = 0x00020202;
+		grp->mccap = 1;
+		grp->cpar = 0;
+	}
+#else
 	ret = nvme_submit_sync_cmd(ns->ctrl->admin_q, (struct nvme_command *)&c,
 				nvme_nvm_id, sizeof(struct nvme_nvm_id));
 	if (ret) {
 		ret = -EIO;
 		goto out;
 	}
+#endif
 
 	nvm_id->ver_id = nvme_nvm_id->ver_id;
 	nvm_id->vmnt = nvme_nvm_id->vmnt;
@@ -327,7 +393,9 @@ static int nvme_nvm_identity(struct nvm_dev *nvmdev, struct nvm_id *nvm_id)
 					sizeof(struct nvm_addr_format));
 
 	ret = init_grps(nvm_id, nvme_nvm_id);
+#ifndef CONFIG_NVM_FAKE
 out:
+#endif
 	kfree(nvme_nvm_id);
 	return ret;
 }
@@ -408,6 +476,11 @@ static int nvme_nvm_get_bb_tbl(struct nvm_dev *nvmdev, struct ppa_addr ppa,
 	if (!bb_tbl)
 		return -ENOMEM;
 
+#ifdef CONFIG_NVM_FAKE
+	strcpy(bb_tbl->tblid, "BBLT");
+	bb_tbl->verid = 1;
+	bb_tbl->tblks = nr_blks;
+#else
 	ret = nvme_submit_sync_cmd(ctrl->admin_q, (struct nvme_command *)&c,
 								bb_tbl, tblsz);
 	if (ret) {
@@ -415,6 +488,7 @@ static int nvme_nvm_get_bb_tbl(struct nvm_dev *nvmdev, struct ppa_addr ppa,
 		ret = -EIO;
 		goto out;
 	}
+#endif
 
 	if (bb_tbl->tblid[0] != 'B' || bb_tbl->tblid[1] != 'B' ||
 		bb_tbl->tblid[2] != 'L' || bb_tbl->tblid[3] != 'T') {
@@ -446,6 +520,23 @@ out:
 static int nvme_nvm_set_bb_tbl(struct nvm_dev *nvmdev, struct ppa_addr *ppas,
 							int nr_ppas, int type)
 {
+#ifdef CONFIG_NVM_FAKE
+	struct ppa_addr *p = (struct ppa_addr *) ((nr_ppas == 1) ?
+		ppas : phys_to_virt(ppas->ppa));
+	int i = 0;
+
+	for (i = 0; i < nr_ppas; i++) {
+		int offset = (p[i].g.ch * FAKE_LUN * FAKE_BLK * FAKE_PLN) +
+			(p[i].g.lun * FAKE_BLK * FAKE_PLN) +
+			(p[i].g.blk * FAKE_PLN) + p[i].g.pl;
+		u8 *bb = nvmdev->bb_buf + offset;
+
+		*bb = type;
+	}
+
+	return 0;
+#else
+
 	struct nvme_ns *ns = nvmdev->q->queuedata;
 	struct nvme_nvm_command c = {};
 	int ret = 0;
@@ -462,8 +553,86 @@ static int nvme_nvm_set_bb_tbl(struct nvm_dev *nvmdev, struct ppa_addr *ppas,
 		dev_err(ns->ctrl->device, "set bad block table failed (%d)\n",
 									ret);
 	return ret;
+#endif
 }
 
+#ifdef CONFIG_NVM_FAKE
+static inline u32 ppa_split(struct nvm_rq *rqd)
+{
+	struct ppa_addr *p = rqd->ppa_list;
+	u64 prev_ppa;
+	u32 i;
+
+	if (rqd->nr_ppas == 1)
+		return 1;
+
+	prev_ppa = p[0].ppa;
+	for (i = 1; i < rqd->nr_ppas; i++) {
+		if (p[i].ppa != (prev_ppa + 1))
+			break;
+		prev_ppa = p[i].ppa;
+	}
+	return i;
+}
+
+static inline void nvme_nvm_rqtocmd(struct nvm_dev *dev, struct request *rq,
+	struct nvm_rq *rqd, struct nvme_ns *ns, struct nvme_command *c)
+{
+	u16 control = 0;
+	u32 dsmgmt = 0;
+
+	if (rq->cmd_flags & REQ_FUA)
+		control |= NVME_RW_FUA;
+	if (rq->cmd_flags & (REQ_FAILFAST_DEV | REQ_RAHEAD))
+		control |= NVME_RW_LR;
+
+	if (rq->cmd_flags & REQ_RAHEAD)
+		dsmgmt |= NVME_RW_DSM_FREQ_PREFETCH;
+
+	memset(c, 0, sizeof(*c));
+	c->rw.opcode = (rqd->opcode == NVM_OP_PWRITE) ?
+			nvme_cmd_write : nvme_cmd_read;
+	c->rw.command_id = rq->tag;
+	c->rw.nsid = cpu_to_le32(ns->ns_id);
+	{
+		struct ppa_addr *p = (struct ppa_addr *) ((rqd->nr_ppas == 1) ?
+			&(rqd->ppa_addr) : rqd->ppa_list);
+		u64 offset = p[0].ppa;
+		u8 *buf = dev->meta_buf + (offset << 4);
+		u8 *meta = phys_to_virt(rqd->dma_meta_list);
+		u32 meta_sz = (u32) rqd->nr_ppas << 4;
+
+		offset &= ((1ULL << 32) - 1);
+		if (rqd->opcode == NVM_OP_PWRITE)
+			memcpy(buf, meta, meta_sz);
+		else
+			memcpy(meta, buf, meta_sz);
+
+		c->rw.slba = offset << (12 - ns->lba_shift);
+	}
+	c->rw.length = cpu_to_le16((blk_rq_bytes(rq) >> ns->lba_shift) - 1);
+
+	if (ns->ms) {
+		switch (ns->pi_type) {
+		case NVME_NS_DPS_PI_TYPE3:
+			control |= NVME_RW_PRINFO_PRCHK_GUARD;
+			break;
+		case NVME_NS_DPS_PI_TYPE1:
+		case NVME_NS_DPS_PI_TYPE2:
+			control |= NVME_RW_PRINFO_PRCHK_GUARD |
+				NVME_RW_PRINFO_PRCHK_REF;
+			c->rw.reftag = cpu_to_le32(
+				nvme_block_nr(ns, blk_rq_pos(rq)));
+			break;
+		}
+		if (!blk_integrity_rq(rq))
+			control |= NVME_RW_PRINFO_PRACT;
+	}
+
+	c->rw.control = cpu_to_le16(control);
+	c->rw.dsmgmt = cpu_to_le32(dsmgmt);
+}
+#else
 static inline void nvme_nvm_rqtocmd(struct request *rq, struct nvm_rq *rqd,
 				struct nvme_ns *ns, struct nvme_nvm_command *c)
 {
@@ -478,6 +647,7 @@ static inline void nvme_nvm_rqtocmd(struct request *rq, struct nvm_rq *rqd,
 		c->hb_rw.slba = cpu_to_le64(nvme_block_nr(ns,
 					rqd->bio->bi_iter.bi_sector));
 }
+#endif
 
 static void nvme_nvm_end_io(struct request *rq, int error)
 {
@@ -497,6 +667,72 @@ static int nvme_nvm_submit_io(struct nvm_dev *dev, struct nvm_rq *rqd)
 	struct nvme_ns *ns = q->queuedata;
 	struct request *rq;
 	struct bio *bio = rqd->bio;
+#ifdef CONFIG_NVM_FAKE
+	struct nvme_command *cmd;
+	u16 nr_ppas;
+	u32 remains, submits;
+	struct ppa_addr *ppa_list;
+	dma_addr_t dma_ppa_list, dma_meta_list;
+
+	if (rqd->opcode == NVM_OP_ERASE) {
+		rqd->ppa_status = 0;
+		rqd->error = 0;
+		nvm_end_io(rqd);
+		return 0;
+	}
+
+	cmd = kzalloc(sizeof(struct nvme_command), GFP_KERNEL);
+	if (!cmd)
+		return -ENOMEM;
+
+	rq = nvme_alloc_request(q, cmd, 0, NVME_QID_ANY);
+	if (IS_ERR(rq)) {
+		kfree(cmd);
+		return -ENOMEM;
+	}
+	rq->cmd_flags &= ~REQ_FAILFAST_DRIVER;
+
+	nr_ppas = remains = rqd->nr_ppas;
+	ppa_list = rqd->ppa_list;
+	dma_ppa_list = rqd->dma_ppa_list;
+	dma_meta_list = rqd->dma_meta_list;
+
+	while (remains) {
+		rqd->nr_ppas = remains;
+		submits = ppa_split(rqd);
+		rqd->nr_ppas = submits;
+		remains -= submits;
+
+		if ((nr_ppas != submits) && (submits == 1))
+			rqd->ppa_addr = rqd->ppa_list[0];
+
+		rq->ioprio = bio_prio(bio);
+		rq->__data_len = (submits << 12);
+		rq->bio = rq->biotail = bio;
+		if (bio_has_data(bio))
+			rq->nr_phys_segments = bio_phys_segments(q, bio);
+
+		nvme_nvm_rqtocmd(dev, rq, rqd, ns, cmd);
+
+		rq->end_io_data = rqd;
+
+		if (remains) {
+			nvme_submit_sync_cmd(q, cmd, bio_data(bio),
+					(submits << 12));
+
+			bio_advance(bio, (submits << 12));
+			rqd->ppa_list += submits;
+			rqd->dma_meta_list += (submits << 4);
+		} else {
+			rqd->nr_ppas = nr_ppas;
+			rqd->ppa_list = ppa_list;
+			rqd->dma_ppa_list = dma_ppa_list;
+			rqd->dma_meta_list = dma_meta_list;
+
+			blk_execute_rq_nowait(q, NULL, rq, 0, nvme_nvm_end_io);
+		}
+	}
+#else
 	struct nvme_nvm_command *cmd;
 
 	cmd = kzalloc(sizeof(struct nvme_nvm_command), GFP_KERNEL);
@@ -522,6 +758,7 @@ static int nvme_nvm_submit_io(struct nvm_dev *dev, struct nvm_rq *rqd)
 	rq->end_io_data = rqd;
 
 	blk_execute_rq_nowait(q, NULL, rq, 0, nvme_nvm_end_io);
+#endif
 
 	return 0;
 }
@@ -567,7 +804,11 @@ static struct nvm_dev_ops nvme_nvm_dev_ops = {
 	.dev_dma_alloc		= nvme_nvm_dev_dma_alloc,
 	.dev_dma_free		= nvme_nvm_dev_dma_free,
 
+#ifdef CONFIG_NVM_FAKE
+	.max_phys_sect		= 32,
+#else
 	.max_phys_sect		= 64,
+#endif
 };
 
 static void nvme_nvm_end_user_vio(struct request *rq, int error)
@@ -808,6 +1049,22 @@ int nvme_nvm_register(struct nvme_ns *ns, char *disk_name, int node)
 	dev->private_data = ns;
 	ns->ndev = dev;
 
+#ifdef CONFIG_NVM_FAKE
+	{
+		unsigned long sz = META_BUF_SZ + (FAKE_CH * FAKE_LUN *
+					FAKE_BLK * FAKE_PLN);
+
+		dev->meta_buf = vzalloc(sz);
+		if (!(dev->meta_buf)) {
+			pr_err("%s: vzalloc=0 sz=%lu\n", __func__, sz);
+			return -ENOMEM;
+		}
+		dev->bb_buf = dev->meta_buf + META_BUF_SZ;
+
+		pr_info("%s: meta_buf=%llx sz=%lu\n", __func__,
+			(u64) dev->meta_buf, sz);
+	}
+#endif
 	return nvm_register(dev);
 }
 
@@ -986,6 +1243,14 @@ int nvme_nvm_ns_supported(struct nvme_ns *ns, struct nvme_id_ns *id)
 	struct nvme_ctrl *ctrl = ns->ctrl;
 	/* XXX: this is poking into PCI structures from generic code! */
 	struct pci_dev *pdev = to_pci_dev(ctrl->dev);
+
+#ifdef CONFIG_NVM_FAKE
+	if (pdev->vendor == FAKE_VENDOR &&
+				pdev->device == FAKE_DEVICE) {
+		pr_info("%s: %x %x\n", __func__, pdev->vendor, pdev->device);
+		return 1;
+	}
+#endif
 
 	/* QEMU NVMe simulator - PCI ID + Vendor specific bit */
 	if (pdev->vendor == PCI_VENDOR_ID_CNEX &&

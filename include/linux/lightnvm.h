@@ -341,6 +341,10 @@ struct nvm_dev {
 	/* target management */
 	struct list_head area_list;
 	struct list_head targets;
+#ifdef CONFIG_NVM_FAKE
+	u8 *meta_buf;
+	u8 *bb_buf;
+#endif
 };
 
 static inline struct ppa_addr linear_to_generic_addr(struct nvm_geo *geo,
